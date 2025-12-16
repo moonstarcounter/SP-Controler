@@ -1,57 +1,48 @@
 # 操作面板 (Operation Panel) 設定說明
 
-## 📁 新增/更新的檔案
+## 📁 專案的檔案結構
 
-```
-network_v1/
+smartplug/
 ├── app/
+│   ├── page.tsx
 │   ├── operation/
-│   │   └── page.tsx                    # ✅ 更新 - 操作面板主頁面
-│   └── api/
-│       ├── relay/
-│       │   └── name/
-│       │       └── route.ts           # ✅ 新增 - 更新繼電器名稱 API
-│       └── logout/
-│           └── route.ts               # ✅ 更新 - 登出 API
-├── pages/
-│   └── api/
-│       └── ws/
-│           └── operation.ts           # ✅ 新增 - WebSocket 伺服器 (Pages Router)
+│   │   └── page.tsx
+│   ├── api/
+│   │   ├── relay/
+│   │   │   └── name/
+│   │   │       └── route.ts
+│   │   ├── logout/
+│   │   │     └── route.ts
+│   │   ├── mqtt/
+│   │   │   ├── connect/
+│   │   │   │   └── route.ts
+│   │   │   └── status/
+│   │   │       └── route.ts 
+│   │   ├── plugName/
+│   │   │   └── route.ts 
+│   │   ├── voltage/
+│   │   │   └── route.ts 
+│   │   └── login/
+│   │       └── route.ts
+│   ├── globals.css
+│   └── layout.tsx
 ├── lib/
-│   ├── mqtt.ts                        # ✅ 更新 - MQTT 管理
-│   └── mqtt-operation.ts              # ✅ 新增 - MQTT 操作面板管理
-└── package.json                       # ✅ 更新 - 新增 ws 依賴
-```
-
-## 🚀 安裝步驟
-
-### 1. 安裝新的依賴套件
-
-```bash
-npm install ws@^8.18.0
-npm install --save-dev @types/ws@^8.5.10
-```
-
-### 2. 創建 pages 目錄（如果不存在）
-
-Next.js 的 WebSocket 支援需要使用 Pages Router：
-
-```bash
-mkdir -p pages/api/ws
-```
-
-### 3. 重啟開發伺服器
-
-```bash
-npm run dev
-```
+│   └── mqtt.ts
+│   └── mqtt-operation.ts
+├── public/
+├── .env.local
+├── .env.local.example
+├── package.json
+├── tsconfig.json
+├── next.config.ts
+├── server.js
+└── README_SETUP.md
 
 ## 🎯 操作面板功能說明
 
 ### 主頁面功能
-
 1. **繼電器控制區**
-   - 6 個繼電器卡片，3 行 × 2 列排列
+   - 6 個繼電器卡片
    - 每個卡片包含：
      - 繼電器名稱（可自訂）
      - 開關切換器（左=開，右=關）
@@ -64,12 +55,11 @@ npm run dev
 
 3. **底部導航欄**
    - 主頁面：返回主控制頁
-   - 溫度記錄：查看溫度歷史（開發中）
-   - 系統設定：系統參數設定（開發中）
+   - 溫度記錄：查看溫度歷史（尚待開發）
+   - 系統設定：MQTT及設備名稱設定
    - 登出：返回登入頁面
 
 ### WebSocket 連線狀態
-
 - 右上角顯示連線狀態
 - 綠色：已連線
 - 紅色：已斷線
@@ -78,7 +68,6 @@ npm run dev
 ## 📡 MQTT 主題設計
 
 ### 訂閱主題（接收）
-
 | 主題 | 說明 | 訊息格式 |
 |------|------|---------|
 | `smartplug/temperature` | 溫度數據 | `{"temperature": 25.5}` |
@@ -87,35 +76,13 @@ npm run dev
 | `smartplug/sensor/data` | 完整感測器數據 | 見下方範例 |
 
 ### 發布主題（發送）
-
 | 主題 | 說明 | 訊息格式 |
 |------|------|---------|
 | `smartplug/relay/control` | 控制繼電器 | `{"id": 0, "state": true}` |
 | `smartplug/relay/name` | 更新名稱 | `{"id": 0, "name": "新名稱"}` |
 | `smartplug/sensor/data` | 請求數據 | `{"action": "request"}` |
 
-### 完整感測器數據格式
-
-```json
-{
-  "temperature": 25.5,
-  "relays": [
-    {
-      "id": 0,
-      "name": "Relay 1",
-      "state": false
-    },
-    {
-      "id": 1,
-      "name": "客廳燈",
-      "state": true
-    }
-    // ... 共 6 個繼電器
-  ]
-}
-```
-
-## 🔧 ESP32 MCU 端 MQTT 實作建議
+## 🔧 ESP32 MCU 端 MQTT 實作
 
 ### 必須實作的功能
 
@@ -125,7 +92,7 @@ npm run dev
 void publishTemperature() {
   float temp = readTemperature();
   String payload = "{\"temperature\":" + String(temp, 1) + "}";
-  mqttClient.publish("smartplug/temperature", payload.c_str());
+  mqttClient.publish("smartplug/plugID/temperature", payload.c_str());
 }
 ```
 
@@ -142,7 +109,7 @@ void handleRelayControl(String payload) {
   
   // 回報狀態
   String response = "{\"id\":" + String(id) + ",\"state\":" + String(state ? "true" : "false") + "}";
-  mqttClient.publish("smartplug/relay/state", response.c_str());
+  mqttClient.publish("smartplug/plugID/relay/state", response.c_str());
 }
 ```
 
@@ -158,7 +125,7 @@ void handleRelayName(String payload) {
   saveRelayName(id, name);
   
   // 確認更新
-  mqttClient.publish("smartplug/relay/name", payload.c_str());
+  mqttClient.publish("smartplug/plugID/relay/name", payload.c_str());
 }
 ```
 
@@ -178,7 +145,7 @@ void publishSensorData() {
   
   String output;
   serializeJson(doc, output);
-  mqttClient.publish("smartplug/sensor/data", output.c_str());
+  mqttClient.publish("smartplug/plugID/sensor/data", output.c_str());
 }
 ```
 
