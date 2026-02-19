@@ -1,6 +1,9 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  // Turbopack 配置 - 解決 Next.js 16 建置錯誤
+  turbopack: {},
+
   // 啟用實驗性功能以支持 WebSocket
   experimental: {
     // 在 Next.js 15+ 中需要這個配置來支持自定義伺服器功能
