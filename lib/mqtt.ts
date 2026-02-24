@@ -87,46 +87,58 @@ export async function connectMqtt(config: MqttConfig): Promise<{ success: boolea
         keepalive: 60,
       });
 
-      // 連線成功處理
-      mqttClient.on('connect', async () => {
-        console.log('✅ MQTT 連線成功');
-        currentClientId = config.clientId;
+        // 連線成功處理
+        mqttClient.on('connect', async () => {
+            console.log('✅ MQTT 連線成功');
+            currentClientId = config.clientId;
 
-        // 更新設定檔案中的 clientId
-        updateSettingsClientId(config.clientId);
+            // 更新設定檔案中的 clientId
+            updateSettingsClientId(config.clientId);
 
-        // 讀取並設置 PlugID
-        try {
-          currentPlugId = await getPlugIdFromSettings();
-          console.log(`使用 PlugID: ${currentPlugId}`);
+            // 讀取並設置 PlugID
+            try {
+                currentPlugId = await getPlugIdFromSettings();
+                console.log(`使用 PlugID: ${currentPlugId}`);
 
-          // 更新 Operation 模組的 PlugID
-          setOperationPlugId(currentPlugId);
+                // 更新 Operation 模組的 PlugID
+                setOperationPlugId(currentPlugId);
 
-          // 立即訂閱電壓與名稱 Topic (QoS 0)
-          if (mqttClient) {
-            const vTopic = MqttTopics.voltage(currentPlugId);
-            const nTopic = MqttTopics.plugName(currentPlugId);
+                // 立即訂閱電壓與名稱 Topic (QoS 1)
+                if (mqttClient) {
+                    const vTopic = MqttTopics.voltage(currentPlugId);
+                    const nTopic = MqttTopics.plugName(currentPlugId);
 
-            mqttClient.subscribe(vTopic, { qos: 0 });
-            mqttClient.subscribe(nTopic, { qos: 0 });
+                    mqttClient.subscribe(vTopic, { qos: 1 });
+                    mqttClient.subscribe(nTopic, { qos: 1 });
 
-            console.log(`📡 [Lib] 已訂閱基礎資訊 Topic: ${currentPlugId}`);
-          }
+                    console.log(`📡 [Lib] 已訂閱基礎資訊 Topic: ${currentPlugId}`);
+                    
+                    // 主動請求電壓數據（發送請求到 ESP32C3）
+                    // 使用 request topic 請求電壓數據
+                    const requestTopic = `smartplug/${currentPlugId}/${currentClientId}/request`;
+                    const requestPayload = JSON.stringify({ type: "getVoltage" });
+                    
+                    setTimeout(() => {
+                        if (mqttClient && mqttClient.connected) {
+                            mqttClient.publish(requestTopic, requestPayload, { qos: 1 });
+                            console.log(`📤 已發送電壓請求到: ${requestTopic}`);
+                        }
+                    }, 1000);
+                }
 
-        } catch (error) {
-          console.error('讀取 PlugID 失敗:', error);
-          currentPlugId = 'defaultPlug';
-          setOperationPlugId(currentPlugId);
-        }
+            } catch (error) {
+                console.error('讀取 PlugID 失敗:', error);
+                currentPlugId = 'defaultPlug';
+                setOperationPlugId(currentPlugId);
+            }
 
-        // 設置操作面板的 MQTT 客戶端
-        if (mqttClient) {
-          setOperationMqttClient(mqttClient, currentClientId);
-        }
+            // 設置操作面板的 MQTT 客戶端
+            if (mqttClient) {
+                setOperationMqttClient(mqttClient, currentClientId);
+            }
 
-        resolve({ success: true, message: 'MQTT 連線成功' });
-      });
+            resolve({ success: true, message: 'MQTT 連線成功' });
+        });
 
       // 連線錯誤處理
       mqttClient.on('error', (error) => {

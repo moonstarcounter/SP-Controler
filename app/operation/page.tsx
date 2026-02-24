@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
+import TemperatureRecordPanel from './temperature-record-panel';
 
 interface Relay {
   id: number;
@@ -488,14 +489,7 @@ export default function OperationPanel() {
         )}
 
         {currentPage === 'temp-record' && (
-          <div className="max-w-4xl mx-auto">
-            <h2 className="text-2xl font-bold text-center text-gray-800 mb-4">
-              溫度記錄
-            </h2>
-            <div className="bg-white rounded-lg shadow-lg p-6">
-              <p className="text-center text-gray-600">溫度記錄功能開發中...</p>
-            </div>
-          </div>
+          <TemperatureRecordPanel />
         )}
 
         {currentPage === 'system-settings' && (

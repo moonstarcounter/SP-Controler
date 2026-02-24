@@ -4,6 +4,10 @@ const next = require('next');
 const { WebSocketServer } = require('ws');
 const mqtt = require('mqtt');
 
+// 溫度記錄服務
+const { initTemperatureLogger, startTemperatureLogging, getLoggerStatus } = require('./lib/temperature-logger');
+const { initTimeSync, startPeriodicTimeSync } = require('./lib/ntp-client');
+
 const dev = process.env.NODE_ENV !== 'production';
 const hostname = '0.0.0.0';
 const port = process.env.PORT || 3000;
@@ -205,7 +209,68 @@ function handleWsMessage(msg, ws, clientId, plugId) {
     }
 }
 
-app.prepare().then(() => {
+// 初始化溫度記錄服務
+async function initializeServices() {
+    try {
+        console.log('🕒 正在初始化時間同步服務...');
+        await initTimeSync();
+        startPeriodicTimeSync(60); // 每小時同步一次
+        
+        console.log('📝 正在初始化溫度記錄服務...');
+        await initTemperatureLogger();
+        
+        // 獲取當前溫度的函數（從 MQTT 中獲取）
+        const getCurrentTemperature = () => {
+            // 這裡需要從 MQTT 訂閱中獲取溫度
+            // 暫時返回一個預設值，實際使用時會從 MQTT 數據中獲取
+            return 25.0; // 預設溫度
+        };
+        
+        // 啟動溫度記錄（每30分鐘記錄一次）
+        startTemperatureLogging(getCurrentTemperature, 30);
+        
+        console.log('✅ 所有服務初始化完成');
+        console.log('📊 溫度記錄服務狀態:', getLoggerStatus());
+        
+    } catch (error) {
+        console.error('❌ 服務初始化失敗:', error);
+    }
+}
+
+// 處理溫度相關的 MQTT 訊息
+function setupTemperatureHandling() {
+    // 這個函數會從 MQTT 中獲取實際溫度數據
+    let currentTemperature = 25.0;
+    
+    mqttClient.on('message', (topic, message) => {
+        try {
+            const msgString = message.toString();
+            const parts = topic.split('/');
+            
+            if (parts.length < 3 || parts[0] !== 'smartplug') return;
+            
+            const category = parts[2];
+            const payload = JSON.parse(msgString);
+            
+            // 如果是溫度訊息，更新當前溫度
+            if (category === 'temperature' && payload.temperature !== undefined) {
+                currentTemperature = payload.temperature;
+                console.log(`🌡️ 收到溫度數據: ${currentTemperature}°C`);
+            }
+        } catch (e) {
+            // 忽略解析錯誤
+        }
+    });
+}
+
+// 在應用準備完成後初始化服務
+app.prepare().then(async () => {
+    // 初始化服務
+    await initializeServices();
+    
+    // 設定溫度處理
+    setupTemperatureHandling();
+    
     const server = createServer(async (req, res) => {
         try {
             const parsedUrl = parse(req.url, true);
