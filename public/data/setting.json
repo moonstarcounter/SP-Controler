@@ -4,8 +4,9 @@
     "mqtt": {
         "broker": "broker.emqx.io",
         "port": "8083",
-        "clientId": "smartplug_random",
+        "clientId": "smartplug_be5b232e",
         "username": "",
         "password": ""
-    }
+    },
+    "plugId": "sp123456"
 }

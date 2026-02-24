@@ -349,12 +349,16 @@ export function publishMqtt(topic: string, message: string, options?: { qos?: 0 
 
 // 控制繼電器（發送到指定 PlugID 的控制主題）
 export function controlRelay(relayId: number, state: boolean, plugId: PlugId = currentPlugId): boolean {
+  console.log(`🔧 controlRelay 被呼叫: relayId=${relayId}, state=${state}, plugId=${plugId}, currentClientId=${currentClientId}`);
   const message = JSON.stringify({
     id: relayId,
     state: state ? "1" : "0"
   });
   const topic = MQTT_TOPICS.CONTROL(plugId, currentClientId);
-  return publishMqtt(topic, message, { qos: 1 });
+  console.log(`📤 準備發送到主題: ${topic}, 訊息: ${message}`);
+  const result = publishMqtt(topic, message, { qos: 1 });
+  console.log(`📤 發送結果: ${result ? '成功' : '失敗'}`);
+  return result;
 }
 
 // 更新繼電器名稱（發送到指定 PlugID 的名稱主題）

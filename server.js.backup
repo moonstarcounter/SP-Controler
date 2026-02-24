@@ -220,93 +220,50 @@ app.prepare().then(() => {
     const wss = new WebSocketServer({ noServer: true });
 
     wss.on('connection', (ws, request) => {
-        try {
-            console.log('╔═══════════════════════════════════════════════╗');
-            console.log('║   WebSocket 連接建立                          ║');
-            console.log('╚═══════════════════════════════════════════════╝');
-            console.log('📋 請求 URL:', request.url);
-            console.log('📋 請求頭:', JSON.stringify(request.headers, null, 2));
-            
-            const url = new URL(request.url, `http://${request.headers.host}`);
-            const clientId = url.searchParams.get('clientId') || `user_${Date.now()}`;
-            const plugId = url.searchParams.get('plugId'); // ⚠️ 必須從前端獲取
+        const url = new URL(request.url, `http://${request.headers.host}`);
+        const clientId = url.searchParams.get('clientId') || `user_${Date.now()}`;
+        const plugId = url.searchParams.get('plugId'); // ⚠️ 必須從前端獲取
 
-            console.log(`📋 解析參數: clientId=${clientId}, plugId=${plugId}`);
+        if (!plugId) {
+            console.warn(`❌ 連接拒絕: 缺少 plugId (ClientId: ${clientId})`);
+            ws.close(1008, 'PlugID Required');
+            return;
+        }
 
-            if (!plugId) {
-                console.warn(`❌ 連接拒絕: 缺少 plugId (ClientId: ${clientId})`);
-                ws.close(1008, 'PlugID Required');
-                return;
-            }
+        console.log(`🔌 新連線: User=[${clientId}] -> Plug=[${plugId}]`);
 
-            console.log(`🔌 新連線: User=[${clientId}] -> Plug=[${plugId}]`);
+        // 1. 儲存連線關係
+        wsClients.set(clientId, { ws, plugId });
 
-            // 1. 儲存連線關係
-            wsClients.set(clientId, { ws, plugId });
+        if (!plugClients.has(plugId)) {
+            plugClients.set(plugId, new Set());
+        }
+        plugClients.get(plugId).add(clientId);
 
-            if (!plugClients.has(plugId)) {
-                plugClients.set(plugId, new Set());
-            }
-            plugClients.get(plugId).add(clientId);
-
-            // 2. 動態訂閱 MQTT (如果是該 PlugID 的第一個使用者)
-            if (!subscribedPlugs.has(plugId)) {
-                const topic = `smartplug/${plugId}/#`; // 訂閱該插座的所有消息
-                console.log(`📡 嘗試訂閱 MQTT Topic: ${topic}`);
-                mqttClient.subscribe(topic, (err) => {
-                    if (!err) {
-                        console.log(`✅ 已訂閱 MQTT Topic: ${topic}`);
-                        subscribedPlugs.add(plugId);
-                    } else {
-                        console.error(`❌ 訂閱 MQTT Topic 失敗: ${topic}`, err);
-                    }
-                });
-            }
-
-            // 3. 發送歡迎訊息
-            try {
-                const welcomeMsg = JSON.stringify({
-                    type: 'connected',
-                    message: 'WebSocket 連接成功',
-                    clientId: clientId,
-                    plugId: plugId,
-                    timestamp: Date.now()
-                });
-                ws.send(welcomeMsg);
-                console.log(`✅ 已發送歡迎訊息給客戶端 ${clientId}`);
-            } catch (sendError) {
-                console.error('❌ 發送歡迎訊息失敗:', sendError);
-            }
-
-            ws.on('message', (message) => {
-                console.log(`📨 收到訊息 [${clientId}]:`, message.toString().substring(0, 100));
-                handleWsMessage(message.toString(), ws, clientId, plugId);
-            });
-
-            ws.on('close', (code, reason) => {
-                console.log(`👋 斷開連線: ${clientId}`);
-                console.log(`   - 關閉代碼: ${code}`);
-                console.log(`   - 原因: ${reason || '無'}`);
-                wsClients.delete(clientId);
-                if (plugClients.has(plugId)) {
-                    plugClients.get(plugId).delete(clientId);
-                    // 為了保持活躍度，通常我們不立即取消訂閱 MQTT，
-                    // 因為可能馬上又有別人連進來。
+        // 2. 動態訂閱 MQTT (如果是該 PlugID 的第一個使用者)
+        if (!subscribedPlugs.has(plugId)) {
+            const topic = `smartplug/${plugId}/#`; // 訂閱該插座的所有消息
+            mqttClient.subscribe(topic, (err) => {
+                if (!err) {
+                    console.log(`📡 已訂閱 MQTT Topic: ${topic}`);
+                    subscribedPlugs.add(plugId);
                 }
             });
-
-            ws.on('error', (error) => {
-                console.error(`❌ WebSocket 錯誤 [${clientId}]:`, error);
-            });
-
-        } catch (error) {
-            console.error('❌ WebSocket 連接處理異常:', error);
-            try {
-                ws.close(1011, 'Internal Server Error');
-            } catch (closeError) {
-                console.error('關閉 WebSocket 失敗:', closeError);
-            }
         }
+
+        ws.on('message', (message) => {
+            handleWsMessage(message.toString(), ws, clientId, plugId);
+        });
+
+        ws.on('close', () => {
+            console.log(`👋 斷開連線: ${clientId}`);
+            wsClients.delete(clientId);
+            if (plugClients.has(plugId)) {
+                plugClients.get(plugId).delete(clientId);
+                // 為了保持活躍度，通常我們不立即取消訂閱 MQTT，
+                // 因為可能馬上又有別人連進來。
+            }
+        });
     });
 
     // 處理 Upgrade 請求 (包含 HMR 修復)
