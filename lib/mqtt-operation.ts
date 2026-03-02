@@ -142,7 +142,6 @@ function subscribeMqttTopics(clientId: string) {
 // 處理 MQTT 訊息
 function handleMqttMessage(topic: string, message: Buffer) {
   const data = message.toString();
-  console.log(`📨 [Operation] 收到 MQTT 訊息 [${topic}]:`, data);
 
   // 嘗試解析 JSON，如果失敗則視為純文字
   let parsedData: any;

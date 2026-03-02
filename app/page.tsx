@@ -28,15 +28,18 @@ export default function LoginPage() {
     plugId?: string;
   } | null>(null);
 
-  // 插座資訊
-  const [plugName, setPlugName] = useState('SmartPlug');
-  const [voltage, setVoltage] = useState<string>('-- V'); // 初始顯示
-  const [voltageLoading, setVoltageLoading] = useState(false);
+// 插座資訊
+const [plugName, setPlugName] = useState('SmartPlug');
+const [voltage, setVoltage] = useState<string>('-- V'); // 初始顯示
+const [voltageLoading, setVoltageLoading] = useState(false);
 
-  // 登入狀態
-  const [loginPassword, setLoginPassword] = useState('');
-  const [errorMessage, setErrorMessage] = useState('');
-  const [loginLoading, setLoginLoading] = useState(false);
+// ESP32 回應狀態
+const [esp32Status, setEsp32Status] = useState<'waiting' | 'responding' | 'timeout' | 'success' | 'error'>('waiting');
+
+// 登入狀態
+const [loginPassword, setLoginPassword] = useState('');
+const [errorMessage, setErrorMessage] = useState('');
+const [loginLoading, setLoginLoading] = useState(false);
 
   // MQTT 配置顯示切換
   const [showMqttConfig, setShowMqttConfig] = useState(true);

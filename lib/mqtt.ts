@@ -17,6 +17,16 @@ export const MqttTopics = {
   // 其他 Topic 定義
   temperature: (plugId: string) => `smartplug/${plugId}/temperature`,
   relayState: (plugId: string) => `smartplug/${plugId}/relay/state`,
+  
+  // announce 相關主題
+  announce: (plugId: string) => `smartplug/${plugId}/announce`,
+  announceResponse: (plugId: string, clientId: string) => `smartplug/${plugId}/${clientId}/announce`,
+  
+  // Client 控制主題
+  control: (plugId: string, clientId: string) => `smartplug/${plugId}/${clientId}/control`,
+  name: (plugId: string, clientId: string) => `smartplug/${plugId}/${clientId}/name`,
+  plugNameTopic: (plugId: string, clientId: string) => `smartplug/${plugId}/${clientId}/plugName`,
+  request: (plugId: string, clientId: string) => `smartplug/${plugId}/${clientId}/request`,
 };
 
 // 更新設定檔案中的 clientId
@@ -107,23 +117,14 @@ export async function connectMqtt(config: MqttConfig): Promise<{ success: boolea
                 if (mqttClient) {
                     const vTopic = MqttTopics.voltage(currentPlugId);
                     const nTopic = MqttTopics.plugName(currentPlugId);
+                    const announceResponseTopic = MqttTopics.announceResponse(currentPlugId, currentClientId);
 
                     mqttClient.subscribe(vTopic, { qos: 1 });
                     mqttClient.subscribe(nTopic, { qos: 1 });
+                    mqttClient.subscribe(announceResponseTopic, { qos: 1 });
 
                     console.log(`📡 [Lib] 已訂閱基礎資訊 Topic: ${currentPlugId}`);
-                    
-                    // 主動請求電壓數據（發送請求到 ESP32C3）
-                    // 使用 request topic 請求電壓數據
-                    const requestTopic = `smartplug/${currentPlugId}/${currentClientId}/request`;
-                    const requestPayload = JSON.stringify({ type: "getVoltage" });
-                    
-                    setTimeout(() => {
-                        if (mqttClient && mqttClient.connected) {
-                            mqttClient.publish(requestTopic, requestPayload, { qos: 1 });
-                            console.log(`📤 已發送電壓請求到: ${requestTopic}`);
-                        }
-                    }, 1000);
+                    console.log(`📡 [Lib] 已訂閱 announce 回應主題: ${announceResponseTopic}`);
                 }
 
             } catch (error) {
@@ -135,6 +136,33 @@ export async function connectMqtt(config: MqttConfig): Promise<{ success: boolea
             // 設置操作面板的 MQTT 客戶端
             if (mqttClient) {
                 setOperationMqttClient(mqttClient, currentClientId);
+            }
+
+            // 延遲發送請求序列
+            if (mqttClient) {
+                // 延遲 1.0 秒：發送 getVoltage 請求
+                setTimeout(() => {
+                    if (mqttClient && mqttClient.connected) {
+                        const requestTopic = MqttTopics.request(currentPlugId, currentClientId);
+                        const requestPayload = JSON.stringify({ type: "getVoltage" });
+                        mqttClient.publish(requestTopic, requestPayload, { qos: 1 });
+                        console.log(`📤 延遲 1.0 秒: 已發送電壓請求到: ${requestTopic}`);
+                    }
+                }, 1000);
+
+                // 延遲 1.5 秒：發布 announce { clientId: "xxx" }
+                setTimeout(() => {
+                    if (mqttClient && mqttClient.connected) {
+                        const announceTopic = MqttTopics.announce(currentPlugId);
+                        const announcePayload = JSON.stringify({ 
+                            clientId: currentClientId,
+                            plugId: currentPlugId
+                        });
+                        mqttClient.publish(announceTopic, announcePayload, { qos: 1 });
+                        console.log(`📤 延遲 1.5 秒: 已發送 announce 到: ${announceTopic}`);
+                        console.log(`📤 Announce 內容: ${announcePayload}`);
+                    }
+                }, 1500);
             }
 
             resolve({ success: true, message: 'MQTT 連線成功' });
