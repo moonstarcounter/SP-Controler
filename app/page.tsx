@@ -28,18 +28,18 @@ export default function LoginPage() {
     plugId?: string;
   } | null>(null);
 
-// 插座資訊
-const [plugName, setPlugName] = useState('SmartPlug');
-const [voltage, setVoltage] = useState<string>('-- V'); // 初始顯示
-const [voltageLoading, setVoltageLoading] = useState(false);
+  // 插座資訊
+  const [plugName, setPlugName] = useState('SmartPlug');
+  const [voltage, setVoltage] = useState<string>('-- V'); // 初始顯示
+  const [voltageLoading, setVoltageLoading] = useState(false);
 
-// ESP32 回應狀態
-const [esp32Status, setEsp32Status] = useState<'waiting' | 'responding' | 'timeout' | 'success' | 'error'>('waiting');
+  // ESP32 回應狀態
+  const [esp32Status, setEsp32Status] = useState<'waiting' | 'responding' | 'timeout' | 'success' | 'error'>('waiting');
 
-// 登入狀態
-const [loginPassword, setLoginPassword] = useState('');
-const [errorMessage, setErrorMessage] = useState('');
-const [loginLoading, setLoginLoading] = useState(false);
+  // 登入狀態
+  const [loginPassword, setLoginPassword] = useState('');
+  const [errorMessage, setErrorMessage] = useState('');
+  const [loginLoading, setLoginLoading] = useState(false);
 
   // MQTT 配置顯示切換
   const [showMqttConfig, setShowMqttConfig] = useState(true);
@@ -59,7 +59,7 @@ const [loginLoading, setLoginLoading] = useState(false);
     setPlugIdError(error);
   };
 
-  // 讀取設定檔案
+  // 讀取設定檔案與啟動連線狀態輪詢
   useEffect(() => {
     // 產生隨機 ClientID
     const randomId = `smartplug_${Math.random().toString(16).slice(2, 10)}`;
@@ -82,31 +82,50 @@ const [loginLoading, setLoginLoading] = useState(false);
           password: data.mqtt?.password || ''
         });
 
-        // 更新插座名稱初始值
-        if (data.plugName) setPlugName(data.plugName);
+        // 檢查後端目前是否已連線
+        checkMqttStatus();
 
-        // 如果有保存的 plugId，則載入
         if (data.plugId) {
           setPlugId(data.plugId);
           const error = validatePlugId(data.plugId);
-          if (error) {
-            setPlugIdError(`已保存的 PlugID 不符合規則: ${error}`);
-          }
+          if (error) setPlugIdError(error);
         }
       } catch (error) {
         console.error('讀取設定檔案時發生錯誤:', error);
-        // 錯誤時至少設定 ClientID
         setMqttConfig(prev => ({ ...prev, clientId: randomId }));
       }
     };
 
+    const checkMqttStatus = async () => {
+      // 如果還沒有 clientId，先不檢查
+      if (!mqttConfig.clientId) return;
+
+      try {
+        const response = await fetch(`/api/mqtt/status?clientId=${mqttConfig.clientId}`);
+        const data = await response.json();
+        if (data.connected) {
+          setMqttStatus('connected');
+          setShowMqttConfig(false);
+          fetchPlugName();
+          fetchVoltage();
+        } else {
+          setMqttStatus('disconnected');
+        }
+      } catch (e) { }
+    };
+
     loadSettings();
+
+    // 每 5 秒檢查一次連線狀態
+    const interval = setInterval(checkMqttStatus, 5000);
+    return () => clearInterval(interval);
   }, []);
 
   // 獲取插座名稱 (API)
   const fetchPlugName = async () => {
     try {
-      const response = await fetch('/api/plugName');
+      const cid = sessionStorage.getItem('mqttClientId');
+      const response = await fetch(`/api/plugName?clientId=${encodeURIComponent(cid || '')}`);
       const data = await response.json();
       if (data.plugName && data.plugName.trim() !== '') {
         setPlugName(data.plugName);
@@ -120,7 +139,8 @@ const [loginLoading, setLoginLoading] = useState(false);
   const fetchVoltage = async () => {
     setVoltageLoading(true);
     try {
-      const response = await fetch('/api/voltage');
+      const cid = sessionStorage.getItem('mqttClientId');
+      const response = await fetch(`/api/voltage?clientId=${encodeURIComponent(cid || '')}`);
       const data = await response.json();
 
       // 根據回傳值判斷顯示
@@ -144,7 +164,7 @@ const [loginLoading, setLoginLoading] = useState(false);
       const response = await fetch('/api/settings');
       if (!response.ok) throw new Error('無法讀取設定檔案');
       const currentSettings = await response.json();
-      
+
       // 更新 plugId 和 MQTT 設定，保留所有其他設定
       const newSettings = {
         ...currentSettings,
@@ -266,7 +286,10 @@ const [loginLoading, setLoginLoading] = useState(false);
       const response = await fetch('/api/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password: loginPassword })
+        body: JSON.stringify({
+          password: loginPassword,
+          clientId: mqttConfig.clientId
+        })
       });
 
       if (response.ok) {

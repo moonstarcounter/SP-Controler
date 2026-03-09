@@ -19,16 +19,16 @@ async function getStoredPassword(): Promise<string> {
 
 export async function POST(request: NextRequest) {
   try {
+    const body = await request.json();
+    const { password, clientId } = body;
+
     // 檢查 MQTT 是否連線
-    if (!getMqttStatus()) {
+    if (!getMqttStatus(clientId)) {
       return NextResponse.json(
-        { message: 'MQTT 未連線，無法登入' },
+        { message: 'MQTT 未連線，無法登入 (Client: ' + (clientId || 'Unknown') + ')' },
         { status: 503 }
       );
     }
-
-    const body = await request.json();
-    const { password } = body;
 
     if (!password) {
       return NextResponse.json(
@@ -37,7 +37,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    console.log('收到登入請求');
+    console.log(`收到登入請求 (Client: ${clientId})`);
 
     // 從設定檔案讀取密碼
     const storedPassword = await getStoredPassword();

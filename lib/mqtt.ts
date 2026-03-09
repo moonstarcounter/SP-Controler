@@ -17,27 +17,36 @@ export const MqttTopics = {
   // 其他 Topic 定義
   temperature: (plugId: string) => `smartplug/${plugId}/temperature`,
   relayState: (plugId: string) => `smartplug/${plugId}/relay/state`,
-  
+
   // announce 相關主題
   announce: (plugId: string) => `smartplug/${plugId}/announce`,
   announceResponse: (plugId: string, clientId: string) => `smartplug/${plugId}/${clientId}/announce`,
-  
+
   // Client 控制主題
   control: (plugId: string, clientId: string) => `smartplug/${plugId}/${clientId}/control`,
   name: (plugId: string, clientId: string) => `smartplug/${plugId}/${clientId}/name`,
   plugNameTopic: (plugId: string, clientId: string) => `smartplug/${plugId}/${clientId}/plugName`,
   request: (plugId: string, clientId: string) => `smartplug/${plugId}/${clientId}/request`,
+
+  // 離線通知主題
+  offline: (plugId: string, clientId: string) => `smartplug/${plugId}/${clientId}/offline`,
 };
 
 // 更新設定檔案中的 clientId
-async function updateSettingsClientId(clientId: string): Promise<void> {
+export async function updateSettingsClientId(clientId: string): Promise<void> {
   try {
     const data = await fs.readFile(SETTINGS_PATH, 'utf-8');
     const settings = JSON.parse(data);
+
+    // 如果 clientId 沒變，不執行寫入，避免 Next.js HMR 重啟
+    if (settings.mqtt.clientId === clientId) {
+      return;
+    }
+
     settings.mqtt.clientId = clientId;
     await fs.writeFile(SETTINGS_PATH, JSON.stringify(settings, null, 4), 'utf-8');
     await fs.writeFile(PUBLIC_SETTINGS_PATH, JSON.stringify(settings, null, 4), 'utf-8');
-    console.log(`設定檔案已更新 clientId: ${clientId}`);
+    console.log(`✅ 設定檔案已更新 clientId: ${clientId}`);
   } catch (error) {
     console.error('更新設定檔案時發生錯誤:', error);
   }
@@ -55,14 +64,32 @@ async function getPlugIdFromSettings(): Promise<string> {
   }
 }
 
-// MQTT 客戶端實例
-let mqttClient: MqttClient | null = null;
+// @ts-ignore
+const mqttShared = require('./mqtt-shared');
+
+// MQTT 用戶端實例 (狀態由 shared 管理)
 let currentClientId: string = '';
 let currentPlugId: string = 'defaultPlug';
 
-// 內存快取數據 (供 API 讀取)
-let plugNameData: string = 'SmartPlug';
-let voltageData: number = 0;
+// 內存快取數據 (供 API 讀取，區分 ClientID)
+// 使用 global 確保在 Next.js HMR 重啟時資料不遺失且跨模組共享
+interface ClientStateCache {
+  plugName: string;
+  voltage: number;
+}
+const CACHE_KEY = Symbol.for('smartplug.mqtt.clientCache');
+if (!(global as any)[CACHE_KEY]) {
+  (global as any)[CACHE_KEY] = new Map<string, ClientStateCache>();
+}
+const clientCache: Map<string, ClientStateCache> = (global as any)[CACHE_KEY];
+
+function getOrCreateCache(clientId: string): ClientStateCache {
+  if (!clientCache.has(clientId)) {
+    console.log(`🆕 [Lib] 為 ${clientId} 建立新的資料快取`);
+    clientCache.set(clientId, { plugName: 'SmartPlug', voltage: 0 });
+  }
+  return clientCache.get(clientId)!;
+}
 
 // MQTT 連線配置介面
 interface MqttConfig {
@@ -73,187 +100,206 @@ interface MqttConfig {
   password?: string;
 }
 
-// 連接到 MQTT Broker
-export async function connectMqtt(config: MqttConfig): Promise<{ success: boolean; message: string }> {
-  return new Promise((resolve) => {
+/**
+ * 客戶端初始化標記，確保訊息處理器只設置一次
+ */
+let isHandlerInited = false;
+
+/**
+ * 初始化共享 MQTT 訊息處理器
+ * 在多使用者架構中，主要由 server.js 的 global_message 做廣播
+ * 此處僅保留基礎的主題監聽，且使用 clientId 作為上下文
+ */
+function initSharedHandlers() {
+  if (isHandlerInited) return;
+  isHandlerInited = true;
+
+  // 接收訊息時，根據 clientId 更新對應的快取
+  mqttShared.on('message', (topic: string, message: Buffer, clientId: string) => {
     try {
-      // 如果已經有連線，先斷開
-      if (mqttClient && mqttClient.connected) {
-        mqttClient.end();
-      }
+      const msgString = message.toString();
+      const cache = getOrCreateCache(clientId);
 
-      const protocol = (config.port === '8083' || config.port === '8084') ? 'ws' : 'mqtt';
-      const connectUrl = `${protocol}://${config.broker}:${config.port}/mqtt`;
-
-      console.log('連接到 MQTT Broker:', connectUrl);
-
-      mqttClient = mqtt.connect(connectUrl, {
-        clientId: config.clientId,
-        username: config.username || undefined,
-        password: config.password || undefined,
-        clean: true,
-        reconnectPeriod: 30000, // 30秒自動重連
-        connectTimeout: 10000,
-        keepalive: 60,
-      });
-
-        // 連線成功處理
-        mqttClient.on('connect', async () => {
-            console.log('✅ MQTT 連線成功');
-            currentClientId = config.clientId;
-
-            // 更新設定檔案中的 clientId
-            updateSettingsClientId(config.clientId);
-
-            // 讀取並設置 PlugID
-            try {
-                currentPlugId = await getPlugIdFromSettings();
-                console.log(`使用 PlugID: ${currentPlugId}`);
-
-                // 更新 Operation 模組的 PlugID
-                setOperationPlugId(currentPlugId);
-
-                // 立即訂閱電壓與名稱 Topic (QoS 1)
-                if (mqttClient) {
-                    const vTopic = MqttTopics.voltage(currentPlugId);
-                    const nTopic = MqttTopics.plugName(currentPlugId);
-                    const announceResponseTopic = MqttTopics.announceResponse(currentPlugId, currentClientId);
-
-                    mqttClient.subscribe(vTopic, { qos: 1 });
-                    mqttClient.subscribe(nTopic, { qos: 1 });
-                    mqttClient.subscribe(announceResponseTopic, { qos: 1 });
-
-                    console.log(`📡 [Lib] 已訂閱基礎資訊 Topic: ${currentPlugId}`);
-                    console.log(`📡 [Lib] 已訂閱 announce 回應主題: ${announceResponseTopic}`);
-                }
-
-            } catch (error) {
-                console.error('讀取 PlugID 失敗:', error);
-                currentPlugId = 'defaultPlug';
-                setOperationPlugId(currentPlugId);
-            }
-
-            // 設置操作面板的 MQTT 客戶端
-            if (mqttClient) {
-                setOperationMqttClient(mqttClient, currentClientId);
-            }
-
-            // 延遲發送請求序列
-            if (mqttClient) {
-                // 延遲 1.0 秒：發送 getVoltage 請求
-                setTimeout(() => {
-                    if (mqttClient && mqttClient.connected) {
-                        const requestTopic = MqttTopics.request(currentPlugId, currentClientId);
-                        const requestPayload = JSON.stringify({ type: "getVoltage" });
-                        mqttClient.publish(requestTopic, requestPayload, { qos: 1 });
-                        console.log(`📤 延遲 1.0 秒: 已發送電壓請求到: ${requestTopic}`);
-                    }
-                }, 1000);
-
-                // 延遲 1.5 秒：發布 announce { clientId: "xxx" }
-                setTimeout(() => {
-                    if (mqttClient && mqttClient.connected) {
-                        const announceTopic = MqttTopics.announce(currentPlugId);
-                        const announcePayload = JSON.stringify({ 
-                            clientId: currentClientId,
-                            plugId: currentPlugId
-                        });
-                        mqttClient.publish(announceTopic, announcePayload, { qos: 1 });
-                        console.log(`📤 延遲 1.5 秒: 已發送 announce 到: ${announceTopic}`);
-                        console.log(`📤 Announce 內容: ${announcePayload}`);
-                    }
-                }, 1500);
-            }
-
-            resolve({ success: true, message: 'MQTT 連線成功' });
-        });
-
-      // 連線錯誤處理
-      mqttClient.on('error', (error) => {
-        console.error('❌ MQTT 連線錯誤:', error);
-        resolve({ success: false, message: `連線錯誤: ${error.message}` });
-      });
-
-      // 斷線處理 - 顯示日誌
-      mqttClient.on('close', () => {
-        console.warn('⚠️ MQTT 連線已斷開');
-      });
-
-      // 斷線處理 - 顯示日誌
-      mqttClient.on('offline', () => {
-        console.warn('⚠️ MQTT 離線');
-      });
-
-      // 重新連接處理
-      mqttClient.on('reconnect', () => {
-        console.log('🔄 MQTT 正在重新連接...');
-      });
-
-      // 接收訊息並更新內存變數
-      mqttClient.on('message', (topic, message) => {
-        const msgStr = message.toString();
-        // console.log(`📨 Lib 收到 [${topic}]:`, msgStr); 
-
+      // 電壓解析
+      if (topic.endsWith('/voltage')) {
+        let parsedVoltage = 0;
         try {
-          const jsonData = JSON.parse(msgStr);
-
-          // 更新電壓快取
-          if (topic === MqttTopics.voltage(currentPlugId)) {
-            // 兼容 {"voltage": 110} 或 直接傳數字/字串
-            voltageData = jsonData.voltage !== undefined ? jsonData.voltage : jsonData;
-            // console.log(`⚡ 電壓數據已更新: ${voltageData}V`);
-          }
-          // 更新名稱快取
-          else if (topic === MqttTopics.plugName(currentPlugId)) {
-            plugNameData = jsonData.plugName || jsonData || 'SmartPlug';
-          }
-
+          const payload = JSON.parse(msgString);
+          parsedVoltage = (payload && payload.voltage !== undefined) ? payload.voltage : payload;
         } catch (e) {
-          console.error('解析 MQTT 訊息失敗:', e);
+          // 非 JSON，嘗試直接提取數字
+          const match = msgString.match(/(\d+(\.\d+)?)/);
+          if (match) parsedVoltage = parseFloat(match[1]);
         }
-      });
 
-      // 連線超時處理
-      setTimeout(() => {
-        if (!mqttClient?.connected) {
-          resolve({ success: false, message: '連線超時' });
+        // 如果 parsedVoltage 是字串（如 "220V"），再次嘗試提取數字
+        if (typeof parsedVoltage === 'string') {
+          const vMatch = (parsedVoltage as string).match(/(\d+(\.\d+)?)/);
+          if (vMatch) parsedVoltage = parseFloat(vMatch[1]);
+          else parsedVoltage = 0;
         }
-      }, 12000);
 
-    } catch (error: any) {
-      console.error('MQTT 連線異常:', error);
-      resolve({ success: false, message: error.message || '未知錯誤' });
+        cache.voltage = Number(parsedVoltage) || 0;
+        console.log(`📊 [Lib] [${clientId}] 電壓更新: ${cache.voltage}V (Raw: ${msgString})`);
+      }
+      // 插座名稱解析
+      else if (topic.endsWith('/plugName')) {
+        try {
+          const payload = JSON.parse(msgString);
+          cache.plugName = (payload && payload.plugName !== undefined) ? payload.plugName : payload;
+        } catch (e) {
+          cache.plugName = msgString;
+        }
+        console.log(`🏷️ [Lib] [${clientId}] 插座名稱更新: ${cache.plugName}`);
+      }
+      // 處理 announce 回應
+      else if (topic.includes('/announce')) {
+        // 確保是給這個 client 的 (smartplug/id/clientId/announce)
+        if (topic.includes(`/${clientId}/announce`)) {
+          try {
+            const payload = JSON.parse(msgString);
+            if (payload.voltage !== undefined) {
+              if (typeof payload.voltage === 'string') {
+                const vMatch = payload.voltage.match(/(\d+(\.\d+)?)/);
+                if (vMatch) cache.voltage = parseFloat(vMatch[1]);
+              } else {
+                cache.voltage = Number(payload.voltage) || 0;
+              }
+            }
+            if (payload.plugName !== undefined) cache.plugName = payload.plugName;
+            console.log(`✅ [Lib] [${clientId}] 自 announce 更新數據: ${cache.voltage}V, ${cache.plugName} (Raw: ${msgString})`);
+          } catch (e) { }
+        }
+      }
+    } catch (e) {
+      console.error('❌ [Lib] 訊息處理錯誤:', e);
     }
   });
 }
 
+// 預先啟動監聽器
+initSharedHandlers();
+
+// 連接到 MQTT Broker
+export async function connectMqtt(config: MqttConfig): Promise<{ success: boolean; message: string }> {
+
+  try {
+    console.log('🔌 透過 SharedManager 請求連接 MQTT:', config.broker);
+
+    // 獲取當前 PlugID 正確設置 will 與初始化
+    currentPlugId = await getPlugIdFromSettings();
+    currentClientId = config.clientId;
+
+    // 將 config 傳給 sharedManager 執行連線
+    const client = mqttShared.connect(config, 'Lib', currentPlugId);
+
+    return new Promise((resolve) => {
+      const onConnect = (connectedClientId: string) => {
+        if (connectedClientId !== config.clientId) return;
+
+        cleanup();
+        console.log(`✅ MQTT 連線成功 (Lib: ${config.clientId})`);
+
+        // 更新狀態
+        setOperationPlugId(currentPlugId);
+        setOperationMqttClient(client, config.clientId);
+
+        // 訂閱基礎主題
+        const vTopic = MqttTopics.voltage(currentPlugId);
+        const nTopic = MqttTopics.plugName(currentPlugId);
+        const announceResponseTopic = MqttTopics.announceResponse(currentPlugId, currentClientId);
+
+        client.subscribe([vTopic, nTopic, announceResponseTopic], { qos: 1 });
+        console.log(`📡 [Lib] 已訂閱基礎資訊與回應主題`);
+
+        // 延遲發送初始化命令
+        setTimeout(() => {
+          if (client.connected) {
+            const requestTopic = MqttTopics.request(currentPlugId, currentClientId);
+            const requestPayload = JSON.stringify({ type: "getVoltage" });
+            client.publish(requestTopic, requestPayload, { qos: 1 });
+            console.log(`📤 已發送電壓請求 (getVoltage)`);
+          }
+        }, 1000);
+
+        setTimeout(() => {
+          if (client.connected) {
+            const announceTopic = MqttTopics.announce(currentPlugId);
+            const announcePayload = JSON.stringify({
+              clientId: currentClientId,
+              plugId: currentPlugId,
+              broker: config.broker,
+              port: config.port,
+              username: config.username || "",
+              password: config.password || ""
+            });
+            client.publish(announceTopic, announcePayload, { qos: 1 });
+            console.log(`📤 已發送 announce`);
+          }
+        }, 1500);
+
+        resolve({ success: true, message: 'MQTT 連線成功' });
+      };
+
+      const onError = (clientId: string, err: Error) => {
+        if (clientId !== config.clientId) return;
+        cleanup();
+        resolve({ success: false, message: `連線失敗: ${err.message}` });
+      };
+
+      const cleanup = () => {
+        mqttShared.removeListener('connect', onConnect);
+        mqttShared.removeListener('error', onError);
+      };
+
+      mqttShared.on('connect', onConnect);
+      mqttShared.on('error', onError);
+
+      // 超時處理
+      setTimeout(() => {
+        cleanup();
+        resolve({ success: false, message: '連線超時' });
+      }, 12000);
+    });
+
+  } catch (error: any) {
+    console.error('MQTT 連線異常:', error);
+    return { success: false, message: error.message || '未知錯誤' };
+  }
+}
+
 // 獲取 MQTT 連線狀態
-export function getMqttStatus(): boolean {
-  return mqttClient?.connected || false;
+export function getMqttStatus(clientId?: string): boolean {
+  if (!clientId) return false;
+  return mqttShared.getStatus(clientId) === 'connected';
 }
 
 // 獲取 MQTT 客戶端
-export function getMqttClient(): MqttClient | null {
-  return mqttClient;
+export function getMqttClient(clientId?: string): any {
+  if (!clientId) return null;
+  return mqttShared.getClient(clientId);
 }
 
-// 獲取插座名稱 (API Route 會呼叫此函數)
-export function getPlugName(): string {
-  return plugNameData;
+// 獲取插座名稱
+export function getPlugName(clientId?: string): string {
+  if (!clientId) return 'SmartPlug';
+  const cache = getOrCreateCache(clientId);
+  return cache.plugName;
 }
 
-// 獲取電壓 (API Route 會呼叫此函數)
-export function getVoltage(): number {
-  return voltageData;
+// 獲取電壓
+export function getVoltage(clientId?: string): number {
+  if (!clientId) return 0;
+  const cache = getOrCreateCache(clientId);
+  console.log(`🔍 [Lib] [${clientId}] getVoltage 請求: ${cache.voltage}V`);
+  return cache.voltage;
 }
 
-// 發布訊息到 MQTT
-export function publishMqtt(topic: string, message: string, options?: { qos?: 0 | 1 | 2, retain?: boolean }): boolean {
-  if (!mqttClient || !mqttClient.connected) {
-    return false;
-  }
-  const qos = options?.qos ?? 1;
-  mqttClient.publish(topic, message, { qos });
+// 發布訊息
+export function publishMqtt(topic: string, message: string, options?: any, clientId?: string): boolean {
+  const client = clientId ? mqttShared.getClient(clientId) : null;
+  if (!client || !client.connected) return false;
+  client.publish(topic, message, { qos: options?.qos ?? 1, retain: options?.retain ?? false });
   return true;
 }
 
@@ -262,12 +308,33 @@ export function getClientId(): string {
   return currentClientId;
 }
 
-// 斷開 MQTT 連線
-export function disconnectMqtt(): void {
-  if (mqttClient) {
-    mqttClient.end();
-    mqttClient = null;
+// 發送離線通知
+export function sendOfflineNotification(clientId?: string): boolean {
+  if (!clientId) return false;
+  const client = mqttShared.getClient(clientId);
+  if (!client || !client.connected) return false;
+
+  try {
+    const offlineTopic = MqttTopics.offline(currentPlugId, clientId);
+    const offlinePayload = JSON.stringify({
+      clientId: clientId,
+      plugId: currentPlugId,
+      reason: "manual_logout",
+      timestamp: Date.now()
+    });
+
+    client.publish(offlineTopic, offlinePayload, { qos: 1 });
+    return true;
+  } catch (error) {
+    return false;
   }
+}
+
+// 斷開 MQTT 連線
+export function disconnectMqtt(clientId?: string): void {
+  if (!clientId) return;
+  sendOfflineNotification(clientId);
+  mqttShared.disconnect(clientId);
 }
 
 // PlugID 驗證函數 (供其他模組使用)

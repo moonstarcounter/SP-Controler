@@ -55,9 +55,9 @@ export async function POST(request: NextRequest) {
         if (oldPlugName !== newPlugName && newPlugName.trim() !== '') {
             const topic = MqttTopics.plugName(plugId);
             const payload = JSON.stringify({ plugName: newPlugName });
-            
-            const broadcastSuccess = publishMqtt(topic, payload, { qos: 1 });
-            
+
+            const broadcastSuccess = publishMqtt(topic, payload, { qos: 1 }, body.mqtt.clientId);
+
             if (broadcastSuccess) {
                 console.log(`📤 已透過 MQTT 廣播插座名稱更新: ${newPlugName} (PlugID: ${plugId})`);
             } else {

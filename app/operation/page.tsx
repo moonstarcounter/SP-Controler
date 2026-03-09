@@ -132,24 +132,26 @@ export default function OperationPanel() {
 
     try {
       console.log('🔄 開始回復原廠設定...');
-      
+
       // 直接呼叫新的 POST /api/settings/factory API
+      const clientId = sessionStorage.getItem('mqttClientId');
       const response = await fetch('/api/settings/factory', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clientId })
       });
 
       const result = await response.json();
 
       if (response.ok && result.success) {
         console.log('✅ 原廠設定回復成功:', result);
-        
+
         // 顯示成功訊息
         alert('原廠設定已成功回復！\n設備名稱和繼電器名稱已更新。');
-        
+
         // 重新載入設定頁面
         loadSettings();
-        
+
         // 更新繼電器名稱為原廠預設值 (Relay 1 ~ Relay 6)
         // 這些更新會透過 WebSocket 自動接收，但為了確保即時性，我們也手動更新
         const defaultRelays = [
@@ -160,10 +162,10 @@ export default function OperationPanel() {
           { id: 4, name: 'Relay 5', state: false },
           { id: 5, name: 'Relay 6', state: false }
         ];
-        
+
         setRelays(defaultRelays);
         console.log('✅ 繼電器名稱已更新為原廠預設值');
-        
+
         // 如果當前在主頁面，重新整理頁面狀態
         if (currentPage === 'home') {
           // 發送請求獲取最新感測器數據
@@ -171,7 +173,7 @@ export default function OperationPanel() {
             wsRef.current.send(JSON.stringify({ command: 'get_sensors' }));
           }
         }
-        
+
       } else {
         throw new Error(result.error || result.details || '回復失敗');
       }
@@ -317,16 +319,17 @@ export default function OperationPanel() {
 
   const handleMessage = (data: any) => {
     switch (data.type) {
+      case 'mqtt_status':
+        console.log('📡 MQTT 狀態更新:', data.status);
+        setMqttConnected(data.connected);
+        break;
+
       case 'sensor_data':
-        if (data.temperature !== undefined) {
+        if (data.temperature !== undefined && data.temperature !== null) {
           setTemperature(data.temperature);
         }
-        if (data.relays) {
-          setRelays(data.relays.map((r: any) => ({
-            id: r.id,
-            name: r.name || `Relay ${r.id + 1}`,
-            state: r.state
-          })));
+        if (data.voltage !== undefined) {
+          // 如果需要顯示電壓，可以在此處理
         }
         break;
 
@@ -342,9 +345,13 @@ export default function OperationPanel() {
         ));
         break;
 
+      case 'plug_name_updated':
+        setSystemSettings(prev => ({ ...prev, plugName: data.plugName }));
+        break;
+
       case 'error':
         console.error('伺服器錯誤:', data.message);
-        alert('操作失敗: ' + data.message);
+        // alert('操作失敗: ' + data.message);
         break;
     }
   };
@@ -389,10 +396,11 @@ export default function OperationPanel() {
       }
 
       try {
+        const clientId = sessionStorage.getItem('mqttClientId');
         const response = await fetch('/api/relay/name', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id, name: trimmedName })
+          body: JSON.stringify({ id, name: trimmedName, clientId })
         });
 
         const result = await response.json();
@@ -417,7 +425,12 @@ export default function OperationPanel() {
   const handleLogout = async () => {
     if (confirm('確定要登出系統嗎?')) {
       try {
-        await fetch('/api/logout', { method: 'POST' });
+        const clientId = sessionStorage.getItem('mqttClientId');
+        await fetch('/api/logout', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ clientId })
+        });
         if (wsRef.current) {
           wsRef.current.close();
         }
