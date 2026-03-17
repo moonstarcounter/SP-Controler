@@ -33,6 +33,9 @@ export default function LoginPage() {
   const [voltage, setVoltage] = useState<string>('-- V'); // 初始顯示
   const [voltageLoading, setVoltageLoading] = useState(false);
 
+  // ESP32 回應狀態
+  const [esp32Status, setEsp32Status] = useState<'waiting' | 'responding' | 'timeout' | 'success' | 'error'>('waiting');
+
   // 登入狀態
   const [loginPassword, setLoginPassword] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
@@ -56,7 +59,7 @@ export default function LoginPage() {
     setPlugIdError(error);
   };
 
-  // 讀取設定檔案
+  // 讀取設定檔案與啟動連線狀態輪詢
   useEffect(() => {
     // 產生隨機 ClientID
     const randomId = `smartplug_${Math.random().toString(16).slice(2, 10)}`;
@@ -79,31 +82,50 @@ export default function LoginPage() {
           password: data.mqtt?.password || ''
         });
 
-        // 更新插座名稱初始值
-        if (data.plugName) setPlugName(data.plugName);
+        // 檢查後端目前是否已連線
+        checkMqttStatus();
 
-        // 如果有保存的 plugId，則載入
         if (data.plugId) {
           setPlugId(data.plugId);
           const error = validatePlugId(data.plugId);
-          if (error) {
-            setPlugIdError(`已保存的 PlugID 不符合規則: ${error}`);
-          }
+          if (error) setPlugIdError(error);
         }
       } catch (error) {
         console.error('讀取設定檔案時發生錯誤:', error);
-        // 錯誤時至少設定 ClientID
         setMqttConfig(prev => ({ ...prev, clientId: randomId }));
       }
     };
 
+    const checkMqttStatus = async () => {
+      // 如果還沒有 clientId，先不檢查
+      if (!mqttConfig.clientId) return;
+
+      try {
+        const response = await fetch(`/api/mqtt/status?clientId=${mqttConfig.clientId}`);
+        const data = await response.json();
+        if (data.connected) {
+          setMqttStatus('connected');
+          setShowMqttConfig(false);
+          fetchPlugName();
+          fetchVoltage();
+        } else {
+          setMqttStatus('disconnected');
+        }
+      } catch (e) { }
+    };
+
     loadSettings();
+
+    // 每 5 秒檢查一次連線狀態
+    const interval = setInterval(checkMqttStatus, 5000);
+    return () => clearInterval(interval);
   }, []);
 
   // 獲取插座名稱 (API)
   const fetchPlugName = async () => {
     try {
-      const response = await fetch('/api/plugName');
+      const cid = sessionStorage.getItem('mqttClientId');
+      const response = await fetch(`/api/plugName?clientId=${encodeURIComponent(cid || '')}`);
       const data = await response.json();
       if (data.plugName && data.plugName.trim() !== '') {
         setPlugName(data.plugName);
@@ -117,9 +139,16 @@ export default function LoginPage() {
   const fetchVoltage = async () => {
     setVoltageLoading(true);
     try {
-      const response = await fetch('/api/voltage');
+      const cid = sessionStorage.getItem('mqttClientId');
+      const response = await fetch(`/api/voltage?clientId=${encodeURIComponent(cid || '')}`);
       const data = await response.json();
-      setVoltage(`AC-${data.voltage}V`);
+
+      // 根據回傳值判斷顯示
+      if (data.voltage !== undefined && data.voltage !== 0) {
+        setVoltage(`AC-${data.voltage}V`);
+      } else {
+        setVoltage('AC-0V (無數據)');
+      }
     } catch (error) {
       console.error('獲取電壓時發生錯誤:', error);
       setVoltage('無法載入電壓');
@@ -128,60 +157,46 @@ export default function LoginPage() {
     }
   };
 
-  // 儲存 PlugID 到設定檔案 (API)
-  const savePlugIdToSettings = async (id: string) => {
+  // 儲存 PlugID 和 MQTT 設定到設定檔案 (API)
+  const savePlugIdToSettings = async (id: string, mqttConfig: any) => {
     try {
-      console.log('💾 開始儲存 PlugID:', id);
-      console.log('🔧 當前 MQTT 配置:', mqttConfig);
-      
-      // 先讀取當前的完整設定
+      // 讀取當前設定檔案，確保獲取完整的設定結構
       const response = await fetch('/api/settings');
-      if (!response.ok) {
-        throw new Error('無法讀取當前設定');
-      }
+      if (!response.ok) throw new Error('無法讀取設定檔案');
       const currentSettings = await response.json();
-      console.log('📋 當前設定:', currentSettings);
-      
-      // 如果 clientId 為空，生成一個隨機的
-      let finalClientId = mqttConfig.clientId || currentSettings.mqtt?.clientId;
-      if (!finalClientId || finalClientId.trim() === '') {
-        finalClientId = `smartplug_${Math.random().toString(16).slice(2, 10)}`;
-        console.log('🆕 生成隨機 ClientID:', finalClientId);
-      }
-      
-      // 更新設定：plugId 和當前的 MQTT 配置
+
+      // 更新 plugId 和 MQTT 設定，保留所有其他設定
       const newSettings = {
         ...currentSettings,
         plugId: id,
         mqtt: {
-          broker: mqttConfig.broker || currentSettings.mqtt?.broker || 'broker.emqx.io',
-          port: mqttConfig.port || currentSettings.mqtt?.port || '8083',
-          clientId: finalClientId,
-          username: mqttConfig.username || currentSettings.mqtt?.username || '',
-          password: mqttConfig.password || currentSettings.mqtt?.password || ''
+          ...currentSettings.mqtt,
+          broker: mqttConfig.broker,
+          port: mqttConfig.port,
+          clientId: mqttConfig.clientId,
+          username: mqttConfig.username || '',
+          password: mqttConfig.password || ''
         }
       };
 
-      console.log('📤 準備儲存的新設定:', newSettings);
-      
       const saveResponse = await fetch('/api/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(newSettings)
       });
 
-      if (!saveResponse.ok) {
-        const errorData = await saveResponse.json().catch(() => ({ error: '未知錯誤' }));
-        console.error('❌ 儲存失敗回應:', errorData);
-        throw new Error(`儲存設定失敗: ${errorData.error || saveResponse.statusText}`);
+      const result = await saveResponse.json();
+      if (!saveResponse.ok || !result.success) {
+        throw new Error(result.error || '儲存設定失敗');
       }
 
-      const successData = await saveResponse.json().catch(() => ({}));
-      console.log('✅ 儲存成功回應:', successData);
-      console.log('✅ PlugID 已儲存到設定檔案:', id);
+      console.log('PlugID 和 MQTT 設定已儲存到設定檔案:', {
+        plugId: id,
+        clientId: mqttConfig.clientId
+      });
       return true;
     } catch (error) {
-      console.error('❌ 儲存 PlugID 時發生錯誤:', error);
+      console.error('儲存 PlugID 和 MQTT 設定時發生錯誤:', error);
       return false;
     }
   };
@@ -199,8 +214,8 @@ export default function LoginPage() {
       return;
     }
 
-    // 先儲存 PlugID 到設定檔案
-    const saved = await savePlugIdToSettings(plugId);
+    // 先儲存 PlugID 和 MQTT 設定到設定檔案
+    const saved = await savePlugIdToSettings(plugId, mqttConfig);
     if (!saved) {
       alert('儲存 PlugID 失敗，請稍後再試');
       return;
@@ -271,7 +286,10 @@ export default function LoginPage() {
       const response = await fetch('/api/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password: loginPassword })
+        body: JSON.stringify({
+          password: loginPassword,
+          clientId: mqttConfig.clientId
+        })
       });
 
       if (response.ok) {

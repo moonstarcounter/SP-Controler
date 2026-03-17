@@ -1,23 +1,19 @@
 import { NextResponse } from 'next/server';
 import { getMqttStatus, getMqttClient, getClientId } from '@/lib/mqtt';
 
-export async function GET() {
-  const connected = getMqttStatus();
-  const mqttClient = getMqttClient();
-  
-  // 收集詳細的狀態資訊
-  let clientId = getClientId();
-  let detailedInfo = {
-    clientId: clientId || '未連接',
+export async function GET(request: Request) {
+  const { searchParams } = new URL(request.url);
+  const clientId = searchParams.get('clientId');
+
+  const connected = getMqttStatus(clientId || undefined);
+  const client = getMqttClient(clientId || undefined);
+
+  return NextResponse.json({
     connected,
-    mqttClientExists: !!mqttClient,
-    mqttConnected: mqttClient?.connected || false,
-    mqttDisconnected: mqttClient?.disconnected || true,
+    clientId: clientId || '未連接',
+    status: connected ? 'connected' : 'disconnected',
+    mqttConnected: client?.connected || false,
     timestamp: new Date().toISOString(),
-  };
-  
-  return NextResponse.json({ 
-    ...detailedInfo,
     message: connected ? 'MQTT 已連線' : 'MQTT 未連線'
   });
 }

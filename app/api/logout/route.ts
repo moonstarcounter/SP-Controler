@@ -3,11 +3,12 @@ import { disconnectMqtt } from '@/lib/mqtt';
 
 export async function POST(request: NextRequest) {
   try {
-    console.log('收到登出請求');
-    
-    // 斷開 MQTT 連線
-    disconnectMqtt();
-    
+    const { clientId } = await request.json();
+    console.log(`收到登出請求: ${clientId}`);
+
+    // 斷開指定的 MQTT 連線
+    disconnectMqtt(clientId);
+
     return NextResponse.json({
       success: true,
       message: '已成功登出'
