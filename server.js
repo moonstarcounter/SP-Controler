@@ -196,6 +196,7 @@ mqttShared.on('message', (topic, message) => {
         let frontendData = null;
 
         if (category === 'temperature') {
+            currentTemperature = payload.temperature; // 同步更新全域變數供記錄器使用
             frontendData = {
                 type: 'sensor_data',
                 temperature: payload.temperature

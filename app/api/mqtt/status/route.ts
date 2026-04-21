@@ -5,11 +5,12 @@ export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const clientId = searchParams.get('clientId');
 
-  const connected = getMqttStatus(clientId || undefined);
+  const { connected, isRegistered } = getMqttStatus(clientId || undefined);
   const client = getMqttClient(clientId || undefined);
 
   return NextResponse.json({
     connected,
+    isRegistered, // 新增：傳遞註冊狀態
     clientId: clientId || '未連接',
     status: connected ? 'connected' : 'disconnected',
     mqttConnected: client?.connected || false,

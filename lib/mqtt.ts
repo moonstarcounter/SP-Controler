@@ -32,24 +32,10 @@ export const MqttTopics = {
   offline: (plugId: string, identity: string) => `smartplug/${plugId}/${identity}/offline`,
 };
 
-// 更新設定檔案中的 clientId
+// 廢除：不再自動更新設定檔案中的 clientId，保護伺服器端全域設定
 export async function updateSettingsClientId(clientId: string): Promise<void> {
-  try {
-    const data = await fs.readFile(SETTINGS_PATH, 'utf-8');
-    const settings = JSON.parse(data);
-
-    // 如果 clientId 沒變，不執行寫入，避免 Next.js HMR 重啟
-    if (settings.mqtt.clientId === clientId) {
-      return;
-    }
-
-    settings.mqtt.clientId = clientId;
-    await fs.writeFile(SETTINGS_PATH, JSON.stringify(settings, null, 4), 'utf-8');
-    await fs.writeFile(PUBLIC_SETTINGS_PATH, JSON.stringify(settings, null, 4), 'utf-8');
-    console.log(`✅ 設定檔案已更新 clientId: ${clientId}`);
-  } catch (error) {
-    console.error('更新設定檔案時發生錯誤:', error);
-  }
+  console.log(`ℹ️ [Lib] 跳過更新設定檔案 clientId (保持全域設定不變): ${clientId}`);
+  return;
 }
 
 // 讀取設定檔案獲取 plugId
@@ -76,17 +62,32 @@ let currentPlugId: string = 'defaultPlug';
 interface ClientStateCache {
   plugName: string;
   voltage: number;
+  isRegistered?: boolean; // 新增註冊狀態欄位
 }
 const CACHE_KEY = Symbol.for('smartplug.mqtt.clientCache');
 if (!(global as any)[CACHE_KEY]) {
   (global as any)[CACHE_KEY] = new Map<string, ClientStateCache>();
 }
 const clientCache: Map<string, ClientStateCache> = (global as any)[CACHE_KEY];
+const MAP_KEY = Symbol.for('smartplug.mqtt.sessionMap');
+if (!(global as any)[MAP_KEY]) {
+  (global as any)[MAP_KEY] = new Map<string, string>();
+}
+const clientIdToIdentityMap: Map<string, string> = (global as any)[MAP_KEY];
+
+// 獲取 Identity 關聯的所有 Session ID
+function getSessionsForIdentity(identity: string): string[] {
+  const sessions: string[] = [];
+  clientIdToIdentityMap.forEach((id, clientId) => {
+    if (id === identity) sessions.push(clientId);
+  });
+  return sessions;
+}
 
 function getOrCreateCache(clientId: string): ClientStateCache {
   if (!clientCache.has(clientId)) {
     console.log(`🆕 [Lib] 為 ${clientId} 建立新的資料快取`);
-    clientCache.set(clientId, { plugName: 'SmartPlug', voltage: 0 });
+    clientCache.set(clientId, { plugName: 'SmartPlug', voltage: 0, isRegistered: undefined });
   }
   return clientCache.get(clientId)!;
 }
@@ -95,7 +96,8 @@ function getOrCreateCache(clientId: string): ClientStateCache {
 export function clearClientCache(clientId: string): void {
   if (clientCache.has(clientId)) {
     clientCache.delete(clientId);
-    console.log(`🧹 [Lib] 已清除 ${clientId} 的資料快取`);
+    clientIdToIdentityMap.delete(clientId); // 同步移除映射
+    console.log(`🧹 [Lib] 已清除 ${clientId} 的資料快取與映射`);
   }
 }
 
@@ -146,77 +148,64 @@ function initSharedHandlers() {
       // 從 Topic 提取 identity: smartplug/{plugId}/{identity}/{type}
       // 或者是 broadcast topic: smartplug/{plugId}/voltage
       const topicParts = topic.split('/');
-      let identity = '';
-
+      let identityFromTopic = '';
       if (topicParts.length >= 4) {
-        identity = topicParts[2]; // 第三個層級通常是 identity
+        identityFromTopic = topicParts[2];
       }
 
-      // 如果是廣播主題，則更新所有已知的 cache (或者特定邏輯)
-      // 這裡簡化處理：如果是廣播主題，則更新 currentClientId (最後連線的那個) 或者是全域廣播
-      const isBroadcast = topicParts.length === 3;
+      // 1. 解析訊息內容（與 ID 無關）
+      let voltage: number | undefined;
+      let plugName: string | undefined;
+      let isRegistered: boolean | undefined;
 
-      const updateCacheForIdentity = (id: string) => {
+      // 電壓與名稱解析
+      if (topic.endsWith('/voltage')) {
+        try {
+          const payload = JSON.parse(msgString);
+          voltage = (payload && payload.voltage !== undefined) ? payload.voltage : payload;
+        } catch (e) {
+          const match = msgString.match(/(\d+(\.\d+)?)/);
+          if (match) voltage = parseFloat(match[1]);
+        }
+      } else if (topic.endsWith('/plugName')) {
+        try {
+          const payload = JSON.parse(msgString);
+          plugName = (payload && payload.plugName !== undefined) ? payload.plugName : payload;
+        } catch (e) { plugName = msgString; }
+      } else if (topic.includes('/announce')) {
+        try {
+          const payload = JSON.parse(msgString);
+          if (payload.voltage !== undefined) voltage = Number(payload.voltage) || 0;
+          if (payload.plugName !== undefined) plugName = payload.plugName;
+          if (payload.registered !== undefined) isRegistered = !!payload.registered;
+        } catch (e) { }
+      }
+
+      // 2. 定義更新函數
+      const applyUpdates = (id: string) => {
         const cache = getOrCreateCache(id);
-
-        // 電壓解析
-        if (topic.endsWith('/voltage')) {
-          let parsedVoltage = 0;
-          try {
-            const payload = JSON.parse(msgString);
-            parsedVoltage = (payload && payload.voltage !== undefined) ? payload.voltage : payload;
-          } catch (e) {
-            const match = msgString.match(/(\d+(\.\d+)?)/);
-            if (match) parsedVoltage = parseFloat(match[1]);
-          }
-          if (typeof parsedVoltage === 'string') {
-            const vMatch = (parsedVoltage as string).match(/(\d+(\.\d+)?)/);
-            if (vMatch) parsedVoltage = parseFloat(vMatch[1]);
-            else parsedVoltage = 0;
-          }
-          cache.voltage = Number(parsedVoltage) || 0;
-          console.log(`📊 [Lib] [${id}] 電壓更新: ${cache.voltage}V`);
-        }
-        // 插座名稱解析
-        else if (topic.endsWith('/plugName')) {
-          try {
-            const payload = JSON.parse(msgString);
-            cache.plugName = (payload && payload.plugName !== undefined) ? payload.plugName : payload;
-          } catch (e) {
-            cache.plugName = msgString;
-          }
-          console.log(`🏷️ [Lib] [${id}] 插座名稱更新: ${cache.plugName}`);
-        }
-        // 處理 announce 回應
-        else if (topic.includes('/announce') && topic.includes(`/${id}/announce`)) {
-          try {
-            const payload = JSON.parse(msgString);
-            if (payload.voltage !== undefined) {
-              if (typeof payload.voltage === 'string') {
-                const vMatch = payload.voltage.match(/(\d+(\.\d+)?)/);
-                if (vMatch) cache.voltage = parseFloat(vMatch[1]);
-              } else {
-                cache.voltage = Number(payload.voltage) || 0;
-              }
-            }
-            if (payload.plugName !== undefined) cache.plugName = payload.plugName;
-            console.log(`✅ [Lib] [${id}] 自 announce 更新數據: ${cache.voltage}V, ${cache.plugName}`);
-          } catch (e) { }
+        if (voltage !== undefined) cache.voltage = voltage;
+        if (plugName !== undefined) cache.plugName = plugName;
+        if (isRegistered !== undefined) {
+          cache.isRegistered = isRegistered;
+          console.log(`🔑 [Lib] [${id}] 註冊狀態同步: ${isRegistered ? '已註冊' : '未註冊'}`);
         }
       };
 
-      if (isBroadcast) {
-        // 廣播主題：只更新目前「仍有效 MQTT 連線」的 session ID 以及 identity
-        clientCache.forEach((_, id) => {
-          const isActiveSession = mqttShared.getStatus(id) === 'connected';
-          const isIdentity = !id.startsWith('smartplug_'); // identity 不是 smartplug_ 開頭
-          if (isActiveSession || isIdentity) {
-            updateCacheForIdentity(id);
-          }
+      // 3. 執行同步廣播
+      if (topicParts.length === 3) { // Broadcast
+        clientCache.forEach((_, id) => applyUpdates(id));
+      } else if (identityFromTopic) {
+        // 更新身分快取
+        applyUpdates(identityFromTopic);
+        // 重要：同步更新所有與該身分關連的 Session 快取
+        const sessions = getSessionsForIdentity(identityFromTopic);
+        sessions.forEach(sid => {
+          applyUpdates(sid);
+          console.log(`🔄 [Lib] 同步數據至 Session: ${sid} (基於身分: ${identityFromTopic})`);
         });
-      } else if (identity) {
-        updateCacheForIdentity(identity);
       }
+
     } catch (e) {
       console.error('❌ [Lib] 訊息處理錯誤:', e);
     }
@@ -245,6 +234,10 @@ export async function connectMqtt(config: MqttConfig): Promise<{ success: boolea
 
         cleanup();
         console.log(`✅ MQTT 連線成功 (Lib: ${config.clientId}, Identity: ${config.identity})`);
+
+        // 核心：建立映射關係
+        clientIdToIdentityMap.set(config.clientId, config.identity);
+        console.log(`🔗 [Map] 建立映射: ${config.clientId} -> ${config.identity}`);
 
         // 更新狀態
         setOperationPlugId(currentPlugId);
@@ -315,12 +308,18 @@ export async function connectMqtt(config: MqttConfig): Promise<{ success: boolea
   }
 }
 
-// 獲取 MQTT 連線狀態
-export function getMqttStatus(clientId?: string): boolean {
-  // 對於共享連線，我們檢查全域的 currentClientId
+// 獲取 MQTT 連線狀態（包含註冊資訊）
+export function getMqttStatus(clientId?: string): { connected: boolean; isRegistered?: boolean } {
   const idToCheck = clientId || currentClientId;
-  if (!idToCheck) return false;
-  return mqttShared.getStatus(idToCheck) === 'connected';
+  if (!idToCheck) return { connected: false };
+
+  const connected = mqttShared.getStatus(idToCheck) === 'connected';
+  const cache = clientCache.get(idToCheck);
+
+  return {
+    connected,
+    isRegistered: cache?.isRegistered
+  };
 }
 
 // 獲取 MQTT 客戶端

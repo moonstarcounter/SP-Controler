@@ -81,7 +81,7 @@ export default function OperationPanel() {
         mqtt: {
           broker: systemSettings.mqttBroker.trim(),
           port: systemSettings.mqttPort.trim(),
-          clientId: currentSettings.mqtt?.clientId || 's4eb1262', // clientId 保留原設定值，不讓使用者覆寫為亂碼
+          clientId: systemSettings.mqttClientId.trim(), // 允許使用者自定義 ClientID
           username: systemSettings.mqttUser.trim(),
           password: systemSettings.mqttPwd.trim() || currentSettings.mqtt?.password || ''
         }
@@ -610,11 +610,11 @@ export default function OperationPanel() {
                         type="text"
                         id="mqttClientId"
                         value={systemSettings.mqttClientId}
-                        readOnly
-                        className="w-full px-3 py-2 sm:px-4 sm:py-3 border border-gray-200 rounded-lg bg-gray-50 text-gray-500 text-sm sm:text-base cursor-not-allowed"
-                        placeholder="由系統自動管理"
+                        onChange={(e) => handleInputChange('mqttClientId', e.target.value)}
+                        className="w-full px-3 py-2 sm:px-4 sm:py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none text-sm sm:text-base"
+                        placeholder="例如 s4eb1262"
                       />
-                      <p className="text-xs text-gray-400 mt-1">此欄位由系統自動管理，無需手動修改</p>
+                      <p className="text-xs text-gray-400 mt-1">若更換 MQTT 平台，請在此修改對應的 ClientID</p>
                     </div>
                   </div>
 

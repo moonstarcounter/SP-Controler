@@ -44,6 +44,11 @@ export async function POST(request: NextRequest) {
             body.loginPassword = existingData.loginPassword;
         }
 
+        // 保護固定 ClientID：確保臨時會話 ID 不會寫回設定檔
+        if (existingData.mqtt && existingData.mqtt.clientId) {
+            body.mqtt.clientId = existingData.mqtt.clientId;
+        }
+
         // 寫入檔案
         await fs.writeFile(SETTINGS_PATH, JSON.stringify(body, null, 4), 'utf-8');
 
